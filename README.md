@@ -1,7 +1,7 @@
 # wait_for_process
+Simple utility to wait for matching running processes to finish and exit. 
 
 ## INTRODUCTION
-Simple utility for to wait for matching running processes to finish and exit. 
 
 If you have one or more processes running on the same machine but outside of
 your current tty this program provides a convenient way to wait for these other
