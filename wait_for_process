@@ -1,0 +1,289 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Getopt::Long;
+use Pod::Usage;
+use POSIX qw/strftime/;
+use Term::ReadKey;
+
+my @processes;    #search processes for these programs
+my @full;         #search whole command line for these strings
+my @users;        #restrict search to these users
+my @ids = ();     #search these actual pids
+my $delay = 10;
+my $quiet;
+my $help;
+my $manual;
+my $continuous;    #keep checking for processes after each cycle
+my $non_interactive;
+
+GetOptions(
+    "non_interactive" => \$non_interactive,
+    "continuous"      => \$continuous,
+    "quiet"           => \$quiet,
+    "id=i{,}"         => \@ids,
+    "delay=f"         => \$delay,
+    "process=s{,}"    => \@processes,
+    'user=s{,}'       => \@users,
+    'full=s'          => \@full,
+    'help'            => \$help,
+    'manual'          => \$manual
+) or pod2usage( -exitval => 2, -message => "Syntax error" );
+pod2usage( -verbose => 2 ) if $manual;
+pod2usage( -verbose => 1 ) if $help;
+pod2usage( -exitval => 2, -message => "Syntax error" )
+  if not @processes
+  and not @users
+  and not @full
+  and not @ARGV
+  and not @ids;
+
+if (@ARGV) {
+    push @processes, @ARGV;
+}
+
+#rewrite to evoke this comand: ps -eo pid,user,pcpu,stat,comm,cmd
+#and grep relevant info from each column?
+my @pids = getProcesses();
+
+die "No matching processes.\n" if not @pids;
+unless ($quiet) {
+    my $time = strftime "%a %b %e %Y: %H:%M:%S", localtime;
+    print "[$time] Waiting for the following PIDs: ";
+    print join( ", ", ( sort { $a <=> $b } @pids ) ) . "\n";
+}
+
+my %finished = ();
+unless ($non_interactive) {
+    ReadMode 3;
+}
+INF: while (1) {
+    my $wait = 0;
+    foreach my $pid (@pids) {
+        if ( -e "/proc/$pid" ) {
+            $wait++;
+        }
+        else {
+            my $time = strftime "%a %b %e %Y: %H:%M:%S", localtime;
+            print "[$time] $pid finished\n"
+              if not exists $finished{$pid} and not $quiet;
+            $finished{$pid}++;
+        }
+    }
+    if ($wait) {
+        if ( not $non_interactive ) {
+            my $key = ReadKey($delay);
+            if ( defined $key ) {
+                exit 0 if $key eq 'q';
+            }
+        }
+        else {
+            sleep($delay);
+        }
+        if ($continuous) {
+            my @prev_pids = @pids;
+            @pids = getProcesses();
+            {no warnings 'experimental';
+            unless ( $quiet or @pids ~~ @prev_pids ) {
+                my $time = strftime "%a %b %e %Y: %H:%M:%S", localtime;
+                print "[$time] Waiting for the following PIDs: ";
+                print join( ", ", ( sort { $a <=> $b } @pids ) ) . "\n";
+            }
+            }
+        }
+    }
+    else {
+        if ($continuous) {
+            @pids =
+              getProcesses();   #in case something new has started while waiting
+            if ( not @pids ) {
+                exit 0;
+            }
+            elsif ( not $quiet ) {
+                my $time = strftime "%a %b %e %Y: %H:%M:%S", localtime;
+                print "[$time] Waiting for the following PIDs: ";
+                print join( ", ", ( sort { $a <=> $b } @pids ) ) . "\n";
+            }
+        }
+        else {
+            exit 0;
+        }
+    }
+}
+
+END {
+    ReadMode 0;
+    print STDERR "Exiting.\n";
+}
+
+######################################################
+sub getProcesses {
+    my @ps = ();
+    if (@processes) {
+        foreach my $prog (@processes) {
+            my $command = "pgrep $prog";
+            push @ps, get_pids( $command, \@users );
+        }
+    }
+    if (@full) {
+        foreach my $prog (@full) {
+            my $command = "pgrep -f $prog";
+            push @ps, get_pids( $command, \@users );
+        }
+    }
+    if ( @users and not @full and not @processes ) {
+        my $command = "pgrep";
+        push @ps, get_pids( $command, \@users );
+    }
+    if (@ids) {
+        push @ps, @ids;
+    }
+    my %seen = ();
+    @ps = grep { !$seen{$_}++ } @ps;    #remove duplicates
+    @ps = grep { $_ != $$ } @ps;        #remove THIS process
+    return @ps;
+}
+######################################################
+sub get_pids {
+    my ( $stub, $u ) = @_;
+    my @ps = ();
+    if (@$u) {
+        foreach my $user (@$u) {
+            my $pid = `$stub -u $user`;
+            push @ps, split( "\n", $pid );
+        }
+    }
+    else {
+        my $pid = `$stub`;
+        push @ps, split( "\n", $pid );
+    }
+    return @ps;
+}
+
+######################################################
+
+=head1 NAME
+
+wait_for_process - wait for matching running processes to finish and exit. 
+
+=head1 SYNOPSIS
+
+        wait_for_process [program name]
+        wait_for_process -p [program name]
+        wait_for_process -f [pattern in full command line]
+        wait_for_process -u [user]
+        wait_for_process -i [pid]
+        wait_for_process -h (display help message)
+        wait_for_process -m (display manual page)
+
+=cut
+
+=head1 ARGUMENTS
+
+=over 8
+
+=item B<-p    --process>
+
+One or more programs to check processes for.
+
+=item B<-f    --full>
+
+One or more strings to search in full commands.
+
+=item B<-u    --user>
+
+One or more users to restrict search to.  If used without --process or --full arguments will search all users processes (including logins!).
+
+=item B<-i    --id>
+
+One or more specific PIDs to check regardless of other options.
+
+=item B<-d    --delay>
+
+Delay in seconds between checks.  Defaults to 10.
+
+=item B<-c    --continuous>
+
+Continuously check for new processes matching your criteria and wait for these to finish too.
+
+=item B<-q    --quiet>
+
+Suppress printing of matching/finished PIDs.
+
+=item B<-n    --non_interactive>
+
+Use this if for some reason you don't want to be able to exit the program by pressing the 'Q' key. 
+
+=item B<-h    --help>
+
+Display help message and exit.
+
+=item B<-m    --manual>
+
+Show manual page and exit.
+
+=back 
+
+=cut
+
+=head1 EXAMPLES
+
+=over 4
+
+=item C<wait_for_process -p cat>
+
+I<wait for all 'cat' processes to finish>
+
+=item C<wait_for_process cat>
+
+I<as above, command line arguments are assumed to be processes if not preceded by one of the above argument categories>
+
+=item C<wait_for_process -p cat -u bob>
+
+I<wait for all 'cat' processes being run by user 'bob' to finish>
+
+=item C<wait_for_process -u bob>
+
+I<wait for all processes being run by user 'bob', including logins, to finish>
+
+=item C<wait_for_process -f foo -c>
+
+I<wait for all commands containing the word 'foo' to finish, including processes spawning while this program is running>
+
+=item C<wait_for_process -p cat -f foo>
+
+I<wait for all 'cat' processes AND all commands containing the word 'foo' to finish>
+
+=item C<wait_for_process -p cat -f foo -u bob>
+
+I<wait for all 'cat' processes by user 'bob' AND all commands containing the word 'foo' by user 'bob' to finish>
+
+=item C<wait_for_process -i 1234>
+
+I<wait for process 1234 to finish>
+
+=back
+
+=head1 DESCRIPTION
+
+This program searches for running processes that match the provided arguments and waits until they have finished before exiting. It can be used to queue a command you want to run once one or more other processes in another session have finished. 
+
+e.g. wait_for_process -p [command generating big_text_file.txt] ; gzip -9 big_text_file.txt
+
+You can exit manually at any time by pressing 'Q' (unless using the --non_interactive option).
+
+Please note - this program only searches for processes running at the time of its execution unless using the --continuous flag.
+
+=cut
+
+=head1 AUTHOR
+
+David A. Parry
+
+=head1 COPYRIGHT AND LICENSE
+
+Copyright 2021  David A. Parry
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with this program. If not, see <http://www.gnu.org/licenses/>.
+
+=cut
